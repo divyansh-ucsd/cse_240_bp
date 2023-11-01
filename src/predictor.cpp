@@ -122,7 +122,7 @@ void cleanup_gshare()
 
 //tournament data structures
 
-int ghistoryBits_tournament = 12;
+int ghistoryBits_tournament = 14;
 int local_hist_bits = 10; // if this changes, change (local_pht_tournament)
 int pc_bits = 10;
 
@@ -169,7 +169,7 @@ void init_tournament()
   
   for (i = 0; i < local_bht_entries; i++)
   {
-    local_bht_tournament[i] = N_0;
+    local_bht_tournament[i] = N_1;
   }
 
   ghistory = 0;
@@ -179,8 +179,9 @@ uint8_t
 tournament_predict_local(uint32_t pc)
 { 
 
-  uint32_t local_bht_entries = 1 << local_hist_bits;
-  uint32_t pc_lower_bits = pc & (local_bht_entries - 1);
+  uint32_t local_pht_entries = 1 << pc_bits;
+  uint32_t pc_lower_bits = pc & (local_pht_entries - 1);
+
   uint32_t local_bht_index = local_pht_tournament[pc_lower_bits] & ((1 << local_hist_bits) - 1);
   uint32_t local_pred_res = local_bht_tournament[local_bht_index];
 
@@ -264,7 +265,8 @@ void train_tournament_local(uint32_t pc, uint8_t outcome)
 { 
 
   uint32_t local_bht_entries = 1 << local_hist_bits;
-  uint32_t pc_lower_bits = pc & (local_bht_entries - 1);
+  uint32_t local_pht_entries = 1 << pc_bits;
+  uint32_t pc_lower_bits = pc & (local_pht_entries - 1);
   uint32_t local_bht_index = local_pht_tournament[pc_lower_bits] & ((1 << local_hist_bits) - 1);
   
   // Update local bht based on the actual outcome
@@ -296,7 +298,7 @@ void train_tournament_local(uint32_t pc, uint8_t outcome)
       break;
   }
 
-  local_pht_tournament[pc_lower_bits] = ((local_pht_tournament[pc_lower_bits] << 1) | outcome) ;
+  local_pht_tournament[pc_lower_bits] = ((local_pht_tournament[pc_lower_bits] << 1) | outcome) & ((1 << local_hist_bits) - 1);
 }
 
 
@@ -345,6 +347,69 @@ void cleanup_tournament()
   free(local_bht_tournament);
 }
 
+//CUSTOM: Perceptron
+
+// Custom Predictor Data Structures
+uint64_t GHR_custom; 
+int8_t weights_table[0x1 << 10][64];
+int perceptron_output;
+uint16_t weights_table_index;
+long int threshold = 75;
+int w0 = 2;
+int ghistoryBits_custom = 59;
+int pcIndexBits_custom = 10;
+
+// Initialize the custom predictor
+void init_custom()
+{
+  GHR_custom = 0;
+  perceptron_output = 0;
+  int j, k;
+
+  for(j = 0; j < (0x1 << pcIndexBits_custom); j++) {
+    for(k = 0; k < ghistoryBits_custom; k++) {
+      weights_table[j][k] = 0;
+    }
+  }
+}
+
+// Make a prediction using the custom predictor
+uint8_t predict_custom(uint32_t pc)
+{
+  weights_table_index = (GHR_custom ^ pc) % (0x1 << pcIndexBits_custom);
+  perceptron_output = w0; // Initialize to w0
+  int k;
+
+  for(k = 0; k < ghistoryBits_custom; k++) {
+    if((GHR_custom & (0x1 << k)) == (0x1 << k)) {
+      perceptron_output += weights_table[weights_table_index][k];
+    } else { 
+      perceptron_output -= weights_table[weights_table_index][k];
+    }
+  }
+
+  return (perceptron_output > 0) ? TAKEN : NOTTAKEN;
+}
+
+// Train the custom predictor
+void train_custom(uint32_t pc, uint8_t outcome)
+{
+  int k;
+  int x[64];
+  int outcome_sign = (outcome == 1) ? 1 : -1;
+
+  // Update logic here
+  if(abs(perceptron_output) <= threshold || (perceptron_output > 0 && outcome == 0) || (perceptron_output <= 0 && outcome == 1)) {
+    for(k = 0; k < ghistoryBits_custom; k++) {
+      x[k] = (GHR_custom & (0x1 << k)) ? 1 : -1;
+      weights_table[weights_table_index][k] += (outcome_sign == x[k]) ? 1 : -1;
+    }
+  }
+
+  // Update history register
+  GHR_custom = ((GHR_custom << 1) | outcome) % (0x1 << ghistoryBits_custom);
+}
+
 void init_predictor()
 {
   switch (bpType)
@@ -358,13 +423,12 @@ void init_predictor()
     init_tournament();
     break;
   case CUSTOM:
+    init_custom();
     break;
   default:
     break;
   }
 }
-
-
 
 // Make a prediction for conditional branch instruction at PC 'pc'
 // Returning TAKEN indicates a prediction of taken; returning NOTTAKEN
@@ -383,7 +447,7 @@ uint32_t make_prediction(uint32_t pc, uint32_t target, uint32_t direct)
   case TOURNAMENT:
     return tournament_predict(pc);
   case CUSTOM:
-    return NOTTAKEN;
+    return predict_custom(pc);
   default:
     break;
   }
@@ -410,7 +474,7 @@ void train_predictor(uint32_t pc, uint32_t target, uint32_t outcome, uint32_t co
     case TOURNAMENT:
       train_tournament(pc, outcome);
     case CUSTOM:
-      return;
+      train_custom(pc, outcome);
     default:
       break;
     }
